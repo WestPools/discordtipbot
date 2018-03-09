@@ -88,6 +88,8 @@ class DiscordBot
         self.statistics(msg)
       when .starts_with? "donate"
         self.donate(msg, cmd)
+      when .starts_with? "offsite"
+        self.offsite(msg, cmd)
       end
     end
 
@@ -762,6 +764,47 @@ class DiscordBot
     end
 
     reply(msg, string)
+  end
+
+  def offsite(msg : Discord::Message, cmd_string : String)
+    return reply(msg, "**ERROR**: This command only works in DMs") unless private?(msg)
+
+    id = msg.author.id
+    return reply(msg, "**ALARM**: This is an admin only command!") unless @config.admins.includes?(id)
+
+    cmd_usage = String.build do |io|
+      io.puts "This command allows the storage of coins off site"
+      io.puts
+      io.puts "- `address` Send coins here to deposit them again"
+      io.puts "- `send` Take coins out of the bot"
+      io.puts "- `bal` Check your current balance for the offsite part"
+    end
+
+    # cmd[0] = "offsite", cmd[1]: category
+    cmd = cmd_string.split(" ")
+
+    if cmd.size < 2
+      return reply(msg, cmd_usage)
+    end
+
+    case cmd[1]
+    when "address"
+      reply(msg, "Send coins here to put them back in the bot: **#{@tip.get_offsite_address(id)}**")
+    when "send"
+      # cmd[2]: address, cmd[3]: amount
+      return reply(msg, "`#{@config.prefix}offsite send [address] [amount]`") unless cmd.size == 4
+
+      amount = amount(msg, cmd[3])
+      return reply(msg, "**ERROR**: Please specify a valid amount") if amount.nil?
+
+      send = @tip.offsite_withdrawal(id, amount, cmd[2])
+      return reply(msg, "Sent coins!") if send
+      reply(msg, "You either specified an invalid address, or sth else went wrong")
+    when .starts_with?("bal")
+      reply(msg, "Your current offsite balance is **#{@tip.get_offsite_balance(msg.author.id)} #{@config.coinname_short}**")
+    else
+      reply(msg, cmd_usage)
+    end
   end
 
   private def active_users(msg : Discord::Message)

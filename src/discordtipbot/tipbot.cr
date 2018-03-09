@@ -85,6 +85,20 @@ class TipBot
     users
   end
 
+  def offsite_withdrawal(user : UInt64, amount : BigDecimal, address : String)
+    return false unless @coin_api.validate_address(address)
+
+    @db.transaction do |tx|
+      begin
+        @db.exec("INSERT INTO offsite(memo, userid, amount) VALUES ('withdrawal', $1, $2)", user, amount)
+        @coin_api.withdraw(address, amount, "Offsite withdrawal for #{user}")
+      rescue
+        tx.rollback
+      end
+    end
+    @log.debug("#{@config.coinname_short}: Offsite withdrawal for #{user}, with #{amount} to #{address}")
+  end
+
   def multi_transfer(from : UInt64, users : Set(UInt64) | Array(UInt64), total : BigDecimal, memo : String)
     @log.debug("#{@config.coinname_short}: Attempting to multitransfer #{total} #{@config.coinname_full} from #{from} to #{users}")
     # We don't have to ensure_user here, since it's redundant
@@ -121,6 +135,21 @@ class TipBot
       @log.debug("#{@config.coinname_short}: New address for #{user}: #{address}")
     end
     return address
+  end
+
+  def get_offsite_address(user : UInt64)
+    @log.debug("#{@config.coinname_short}: Attempting to get new offsite address for #{user}")
+    ensure_user(user)
+
+    address = @db.query_one?("SELECT address FROM offsite_addresses WHERE userid=$1", user, as: String?)
+
+    if address.nil?
+      address = @coin_api.new_address
+
+      @db.exec("INSERT INTO offsite_addresses (address, userid) VALUES ($1, $2)", address, user)
+      @log.debug("#{@config.coinname_short}: New offsite address for #{user}: #{address}")
+    end
+    address
   end
 
   def get_balance(user : UInt64)
@@ -224,21 +253,34 @@ class TipBot
 
         next unless details["category"] == "receive"
 
-        query = @db.query_all("SELECT userid FROM accounts WHERE address=$1", details["address"], as: Int64?)
+        address = details["address"]
+        next unless address.is_a?(String)
+
+        amount = details["amount"]
+        next unless amount.is_a?(Float64)
+        amount = BigDecimal.new(amount)
+
+        query = @db.query_all("SELECT userid FROM accounts WHERE address=$1", address, as: Int64?)
         next if query.nil?
 
-        update = update_coin_transaction(transaction, "never") if (query == [0] || query.empty?)
-        # only continue if update.nil? (No changes)
-        unless update.nil?
-          @log.debug("#{@config.coinname_short}: Invalid deposit at #{transaction}")
-          next
+        if (query == [0] || query.empty?)
+          if check_offsite_deposits(address, amount)
+            update = update_coin_transaction(transaction, "offsite")
+            @log.debug("#{@config.coinname_short}: Returned offsite deposit at #{transaction}")
+          else
+            update = update_coin_transaction(transaction, "never")
+            @log.debug("#{@config.coinname_short}: Invalid deposit at #{transaction}")
+          end
         end
+
+        # only continue if update.nil? (No changes)
+        next unless update.nil?
 
         userid = query[0]
         next if userid.nil?
 
         db = @db.transaction do
-          @db.exec("INSERT INTO transactions(memo, from_id, to_id, amount) VALUES ($1, 0, $2, $3)", "deposit (#{transaction})", userid.to_u64, details["amount"])
+          @db.exec("INSERT INTO transactions(memo, from_id, to_id, amount) VALUES ($1, 0, $2, $3)", "deposit (#{transaction})", userid.to_u64, amount)
           update_coin_transaction(transaction, "credited to #{userid}")
         end
         if db
@@ -246,12 +288,20 @@ class TipBot
           delete_deposit_address(userid.to_u64)
 
           users << userid.to_u64
-          @log.debug("#{@config.coinname_short}: #{userid} deposited #{details["amount"]} #{@config.coinname_short} in TX #{transaction}")
+          @log.debug("#{@config.coinname_short}: #{userid} deposited #{amount} #{@config.coinname_short} in TX #{transaction}")
         end
       end
     end
 
     return users
+  end
+
+  def check_offsite_deposits(address : String, amount : BigDecimal)
+    query = @db.query_one("SELECT userid FROM offsite_addresses WHERE address=$1", address, as: Int64?)
+    return false if query.nil?
+
+    db.exec("INSERT INTO offsite(memo, userid, amount) VALUES ('deposit', $1, $2)", query, amount)
+    true
   end
 
   def insert_history_deposits
@@ -278,6 +328,16 @@ class TipBot
 
   def get_high_balance(high_balance : Int32)
     @db.query_all("SELECT userid FROM accounts WHERE balance > $1", high_balance, as: Int64)
+  end
+
+  def get_offsite_balance(user : UInt64)
+    sql = <<-SQL
+        SELECT (
+          (SELECT COALESCE( SUM (amount), 0) FROM offsite WHERE userid=$1 AND memo = 'deposit')
+          - (SELECT COALESCE( SUM (amount), 0) FROM offsite WHERE userid=$1 AND memo = 'withdrawal')
+        ) AS sum
+    SQL
+    @db.query_one(sql, user, as: BigDecimal)
   end
 
   private def delete_deposit_address(user : UInt64)
