@@ -111,22 +111,10 @@ class DiscordBot
       @active_users_cache.touch(msg.channel_id, msg.author.id, msg.timestamp.to_utc) unless msg.author.bot
     end
 
-    # Check if total user balance exceeds node balance every ~60 seconds in extra fiber
+    # Check if it's time to send off (or on) site
     spawn do
-      Discord.every(60.seconds) do
-        node = @tip.node_balance
-        next if node.nil?
-
-        users = @tip.deposit_sum - @tip.withdrawal_sum
-
-        if node < @tip.db_balance || node < users
-          string = "**ALARM**: Total user balance exceeds node balance\n*Shutting bot down*"
-          @config.admins.each do |x|
-            @bot.create_message(@cache.resolve_dm_channel(x), string)
-          end
-          @log.error("#{@config.coinname_short}: #{string}")
-          exit
-        end
+      Discord.every(10.seconds) do
+        sleep 10.minutes if check_and_notify_if_its_time_to_send_back_onsite || check_and_notify_if_its_time_to_send_offsite
       end
     end
 
@@ -169,7 +157,7 @@ class DiscordBot
             Discord::EmbedField.new(name: "Membercount", value: payload.member_count.to_s),
           ]
         )
-        post_embed_to_webhook(embed)
+        post_embed_to_webhook(embed, @config.general_webhook)
 
         handle_new_guild(payload)
       end
@@ -428,7 +416,7 @@ class DiscordBot
         timestamp: Time.now,
         fields: fields
       )
-      post_embed_to_webhook(embed)
+      post_embed_to_webhook(embed, @config.general_webhook)
     when "insufficient balance"
       reply(msg, "**ERROR**: Insufficient balance")
     when "error"
@@ -842,8 +830,8 @@ class DiscordBot
     end
   end
 
-  private def post_embed_to_webhook(embed : Discord::Embed)
-    @bot.execute_webhook(@config.webhook_id, @config.webhook_token, embeds: [embed])
+  private def post_embed_to_webhook(embed : Discord::Embed, webhook : Webhook)
+    @bot.execute_webhook(webhook.id, webhook.token, embeds: [embed])
   end
 
   private def bot(user : Discord::User)
@@ -852,5 +840,47 @@ class DiscordBot
       return false if @config.whitelisted_bots.includes?(user.id)
     end
     bot_status
+  end
+
+  private def check_and_notify_if_its_time_to_send_offsite
+    wallet = @tip.node_balance
+    users = @tip.db_balance
+
+    if (wallet / users) > 0.3
+      embed = Discord::Embed.new(
+        title: "It's time to send some coins off site",
+        description: "Please remove **#{wallet - (users * BigDecimal.new(0.25))} #{@config.coinname_short}** from the bot and to your own wallet! `#{@config.prefix}offsite send`",
+        colour: 0x0066ff_u32,
+        timestamp: Time.now,
+        fields: [
+          Discord::EmbedField.new(name: "Current Total User Balance", value: "#{users}"),
+          Discord::EmbedField.new(name: "Current Wallet Balance", value: "#{wallet}"),
+        ]
+      )
+      post_embed_to_webhook(embed, @config.admin_webhook)
+      return true
+    end
+    false
+  end
+
+  private def check_and_notify_if_its_time_to_send_back_onsite
+    wallet = @tip.node_balance
+    users = @tip.db_balance
+    # TODO if (wallet / users) < 0.2
+    if (wallet / users) < 0.2
+      embed = Discord::Embed.new(
+        title: "It's time to send some coins back to the bot",
+        description: "Please deposit **#{wallet - (users * BigDecimal.new(0.35))} #{@config.coinname_short}** to the bot (your own `#{@config.prefix}offsite address`)",
+        colour: 0xff0066_u32,
+        timestamp: Time.now,
+        fields: [
+          Discord::EmbedField.new(name: "Current Total User Balance", value: "#{users}"),
+          Discord::EmbedField.new(name: "Current Wallet Balance", value: "#{wallet}"),
+        ]
+      )
+      post_embed_to_webhook(embed, @config.admin_webhook)
+      return true
+    end
+    false
   end
 end
