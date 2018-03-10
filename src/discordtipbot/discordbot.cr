@@ -114,7 +114,8 @@ class DiscordBot
     # Check if it's time to send off (or on) site
     spawn do
       Discord.every(10.seconds) do
-        sleep 10.minutes if check_and_notify_if_its_time_to_send_back_onsite || check_and_notify_if_its_time_to_send_offsite
+        check_and_notify_if_its_time_to_send_back_onsite
+        check_and_notify_if_its_time_to_send_offsite
       end
     end
 
@@ -452,7 +453,11 @@ class DiscordBot
     when false
       reply(msg, "**ERROR**: There was a problem trying to withdraw. Please try again later. If the problem persists, please contact the dev for help in #{@config.prefix}support")
     when true
-      reply(msg, "Pending withdrawal of **#{amount} #{@config.coinname_short}** to **#{address}**. *Processing shortly*" + Emoji::Cursor)
+      string = String.build do |io|
+        io.puts "Pending withdrawal of **#{amount} #{@config.coinname_short}** to **#{address}**. *Processing shortly*" + Emoji::Cursor
+        io.puts "You might experience a bigger delay right now, since the wallet is running low on funds and requires a manual top up." if @tip.node_balance < amount
+      end
+      reply(msg, string)
     end
   end
 
@@ -755,7 +760,7 @@ class DiscordBot
   end
 
   def offsite(msg : Discord::Message, cmd_string : String)
-    return reply(msg, "**ERROR**: This command only works in DMs") unless private?(msg)
+    return reply(msg, "**ERROR**: This command only works in DMs") unless private?(msg) unless msg.channel_id == 421752342262579201
 
     id = msg.author.id
     return reply(msg, "**ALARM**: This is an admin only command!") unless @config.admins.includes?(id)
@@ -790,6 +795,22 @@ class DiscordBot
       reply(msg, "You either specified an invalid address, or sth else went wrong")
     when .starts_with?("bal")
       reply(msg, "Your current offsite balance is **#{@tip.get_offsite_balance(msg.author.id)} #{@config.coinname_short}**")
+    when "status"
+      users = @tip.total_db_balance.round(2)
+      wallet = @tip.node_balance.round(2)
+
+      embed = Discord::Embed.new(
+        title: "Status",
+        colour: 0x00ccff_u32,
+        timestamp: Time.now,
+        fields: [
+          Discord::EmbedField.new(name: "Wallet Balance", value: "#{wallet} #{@config.coinname_short}"),
+          Discord::EmbedField.new(name: "Users Balance", value: "#{users} #{@config.coinname_short}"),
+          Discord::EmbedField.new(name: "Ideal Wallet Balance Range", value: "#{users * BigDecimal.new(0.25)}..#{users * BigDecimal.new(0.35)}"),
+          Discord::EmbedField.new(name: "Current Percentage", value: "#{((wallet / users) * 100).round(4)}%")
+        ]
+      )
+      @bot.create_message(msg.channel_id, "​", embed)
     else
       reply(msg, cmd_usage)
     end
@@ -843,44 +864,76 @@ class DiscordBot
   end
 
   private def check_and_notify_if_its_time_to_send_offsite
-    wallet = @tip.node_balance
+    wallet = @tip.node_balance(@config.confirmations)
     users = @tip.db_balance
+    goal_percentage = BigDecimal.new(0.25)
 
-    if (wallet / users) > 0.3
+    if (wallet / users) > 0.4
+      return if @tip.pending_withdrawal_sum > @tip.node_balance
+      missing = wallet - (users * goal_percentage)
+      return if @tip.pending_coin_transactions
+      current_percentage = ((wallet / users) * 100).round(4)
       embed = Discord::Embed.new(
         title: "It's time to send some coins off site",
-        description: "Please remove **#{wallet - (users * BigDecimal.new(0.25))} #{@config.coinname_short}** from the bot and to your own wallet! `#{@config.prefix}offsite send`",
+        description: "Please remove **#{missing} #{@config.coinname_short}** from the bot and to your own wallet! `#{@config.prefix}offsite send`",
         colour: 0x0066ff_u32,
         timestamp: Time.now,
-        fields: [
-          Discord::EmbedField.new(name: "Current Total User Balance", value: "#{users}"),
-          Discord::EmbedField.new(name: "Current Wallet Balance", value: "#{wallet}"),
-        ]
+        fields: offsite_fields(users, wallet, current_percentage, goal_percentage * 100)
       )
       post_embed_to_webhook(embed, @config.admin_webhook)
-      return true
+      wait_for_balance_change(wallet, Compare::Smaller)
     end
-    false
   end
 
   private def check_and_notify_if_its_time_to_send_back_onsite
-    wallet = @tip.node_balance
+    wallet = @tip.node_balance(@config.confirmations)
     users = @tip.db_balance
-    # TODO if (wallet / users) < 0.2
-    if (wallet / users) < 0.2
+    goal_percentage = BigDecimal.new(0.35)
+
+    if (wallet / users) < 0.2 || @tip.pending_withdrawal_sum > @tip.node_balance
+      missing = wallet - (users * goal_percentage)
+      missing = missing - @tip.pending_withdrawal_sum if @tip.pending_withdrawal_sum > @tip.node_balance
+      current_percentage = ((wallet / users) * 100).round(4)
       embed = Discord::Embed.new(
         title: "It's time to send some coins back to the bot",
-        description: "Please deposit **#{wallet - (users * BigDecimal.new(0.35))} #{@config.coinname_short}** to the bot (your own `#{@config.prefix}offsite address`)",
+        description: "Please deposit **#{missing} #{@config.coinname_short}** to the bot (your own `#{@config.prefix}offsite address`)",
         colour: 0xff0066_u32,
         timestamp: Time.now,
-        fields: [
-          Discord::EmbedField.new(name: "Current Total User Balance", value: "#{users}"),
-          Discord::EmbedField.new(name: "Current Wallet Balance", value: "#{wallet}"),
-        ]
+        fields: offsite_fields(users, wallet, current_percentage, goal_percentage * 100)
       )
       post_embed_to_webhook(embed, @config.admin_webhook)
-      return true
+      wait_for_balance_change(wallet, Compare::Bigger)
     end
-    false
+  end
+
+  private def offsite_fields(user_balance : BigDecimal, wallet_balance : BigDecimal, current_percentage, goal_percentage)
+    [
+      Discord::EmbedField.new(name: "Current Total User Balance", value: "#{user_balance} #{@config.coinname_short}"),
+      Discord::EmbedField.new(name: "Current Wallet Balance", value: "#{wallet_balance} #{@config.coinname_short}"),
+      Discord::EmbedField.new(name: "Current Percentage", value: "#{current_percentage}%"),
+      Discord::EmbedField.new(name: "Goal Percentage", value: "#{goal_percentage}%")
+    ]
+  end
+
+  private def wait_for_balance_change(old_balance : BigDecimal, compare : Compare)
+    time = Time.now
+
+    new_balance = 0
+
+    loop do
+      return if (Time.now - time) > 10.minutes
+      new_balance = @tip.node_balance
+      break if new_balance > old_balance if compare.bigger?
+      break if new_balance < old_balance if compare.smaller?
+      sleep 1
+    end
+
+    embed = Discord::Embed.new(
+      title: "Success",
+      colour: 0x00ff00_u32,
+      timestamp: Time.now,
+      fields: [Discord::EmbedField.new(name: "New wallet balance", value: "#{new_balance} #{@config.coinname_short}")]
+    )
+    post_embed_to_webhook(embed, @config.admin_webhook)
   end
 end

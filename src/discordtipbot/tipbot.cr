@@ -67,9 +67,11 @@ class TipBot
   end
 
   def process_pending_withdrawals
+    users = Set(UInt64).new
+
+    return users if self.pending_withdrawal_sum > self.node_balance(@config.confirmations)
     record = {id: Int32, from_id: Int64, address: String, amount: BigDecimal}
     pending = @db.query_all("SELECT id, from_id, address, amount FROM withdrawals WHERE status = 'pending'", as: record)
-    users = Set(UInt64).new
     pending.each do |x|
       begin
         @coin_api.withdraw(x[:address], x[:amount], "Withdrawal for #{x[:from_id]}")
@@ -94,9 +96,11 @@ class TipBot
         @coin_api.withdraw(address, amount, "Offsite withdrawal for #{user}")
       rescue
         tx.rollback
+        return false
       end
     end
     @log.debug("#{@config.coinname_short}: Offsite withdrawal for #{user}, with #{amount} to #{address}")
+    true
   end
 
   def multi_transfer(from : UInt64, users : Set(UInt64) | Array(UInt64), total : BigDecimal, memo : String)
@@ -201,8 +205,20 @@ class TipBot
     @db.query_one("SELECT SUM (balance) FROM accounts", as: BigDecimal)
   end
 
-  def node_balance
-    @coin_api.balance
+  def node_balance(confirmations = 0)
+    @coin_api.balance(confirmations)
+  end
+
+  def pending_withdrawal_sum
+    @db.query_one("SELECT SUM (amount) FROM withdrawals WHERE status = 'pending'", as: BigDecimal?) || BigDecimal.new(0)
+  end
+
+  def pending_coin_transactions
+    (@db.query_one("SELECT SUM(1) FROM coin_transactions WHERE status = 'new'", as: Int64?) || 0) > 0
+  end
+
+  def total_db_balance
+    db_balance + pending_withdrawal_sum
   end
 
   def withdrawal_sum
