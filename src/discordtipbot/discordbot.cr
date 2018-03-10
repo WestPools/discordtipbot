@@ -807,7 +807,7 @@ class DiscordBot
           Discord::EmbedField.new(name: "Wallet Balance", value: "#{wallet} #{@config.coinname_short}"),
           Discord::EmbedField.new(name: "Users Balance", value: "#{users} #{@config.coinname_short}"),
           Discord::EmbedField.new(name: "Ideal Wallet Balance Range", value: "#{users * BigDecimal.new(0.25)}..#{users * BigDecimal.new(0.35)}"),
-          Discord::EmbedField.new(name: "Current Percentage", value: "#{((wallet / users) * 100).round(4)}%")
+          Discord::EmbedField.new(name: "Current Percentage", value: "#{((wallet / users) * 100).round(4)}%"),
         ]
       )
       @bot.create_message(msg.channel_id, "​", embed)
@@ -911,7 +911,7 @@ class DiscordBot
       Discord::EmbedField.new(name: "Current Total User Balance", value: "#{user_balance} #{@config.coinname_short}"),
       Discord::EmbedField.new(name: "Current Wallet Balance", value: "#{wallet_balance} #{@config.coinname_short}"),
       Discord::EmbedField.new(name: "Current Percentage", value: "#{current_percentage}%"),
-      Discord::EmbedField.new(name: "Goal Percentage", value: "#{goal_percentage}%")
+      Discord::EmbedField.new(name: "Goal Percentage", value: "#{goal_percentage}%"),
     ]
   end
 
