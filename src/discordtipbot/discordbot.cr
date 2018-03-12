@@ -455,7 +455,7 @@ class DiscordBot
     when true
       string = String.build do |io|
         io.puts "Pending withdrawal of **#{amount} #{@config.coinname_short}** to **#{address}**. *Processing shortly*" + Emoji::Cursor
-        io.puts "You might experience a bigger delay right now, since the wallet is running low on funds and requires a manual top up." if @tip.node_balance < amount
+        io.puts "For security reasons large withdrawals have to be processed manually right now" if @tip.node_balance < amount
       end
       reply(msg, string)
     end
